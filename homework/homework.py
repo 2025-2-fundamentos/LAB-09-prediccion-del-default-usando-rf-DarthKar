@@ -92,3 +92,160 @@
 # {'type': 'cm_matrix', 'dataset': 'train', 'true_0': {"predicted_0": 15562, "predicte_1": 666}, 'true_1': {"predicted_0": 3333, "predicted_1": 1444}}
 # {'type': 'cm_matrix', 'dataset': 'test', 'true_0': {"predicted_0": 15562, "predicte_1": 650}, 'true_1': {"predicted_0": 2490, "predicted_1": 1420}}
 #
+
+import pandas as pd
+import json
+import gzip
+import pickle
+import os
+
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import GridSearchCV
+from sklearn.metrics import (
+    precision_score,
+    recall_score,
+    f1_score,
+    balanced_accuracy_score,
+    confusion_matrix,
+    make_scorer
+)
+
+
+def solucion():
+
+    def cargar_archivo(ruta):
+        return pd.read_csv(ruta, index_col=False, compression="zip")
+
+
+    def depurar(df):
+        df = df.rename(columns={"default payment next month": "default"})
+        df = df.drop(columns=["ID"])
+        df = df.dropna()
+        df["EDUCATION"] = df["EDUCATION"].apply(lambda x: x if x < 4 else 4)
+        return df
+
+
+    def construir_pipeline():
+        cat_vars = ["SEX", "EDUCATION", "MARRIAGE"]
+
+        codificador = ColumnTransformer(
+            transformers=[
+                ("categoricas", OneHotEncoder(handle_unknown="ignore"), cat_vars)
+            ],
+            remainder="passthrough"
+        )
+
+        modelo = Pipeline(steps=[
+            ("preprocesamiento", codificador),
+            ("clasificador", RandomForestClassifier(random_state=42))
+        ])
+
+        return modelo
+
+
+    def ajustar_modelo(pipe, x_train, y_train):
+        grid = {
+            "clasificador__n_estimators": [100, 200, 300],
+            "clasificador__max_depth": [None, 10, 20, 30],
+            "clasificador__min_samples_split": [2, 5, 10],
+        }
+
+        puntuador = make_scorer(balanced_accuracy_score)
+
+        optimizador = GridSearchCV(
+            estimator=pipe,
+            param_grid=grid,
+            scoring=puntuador,
+            cv=10,
+            n_jobs=-1,
+            verbose=1
+        )
+
+        optimizador.fit(x_train, y_train)
+        return optimizador
+
+
+    def guardar_modelo(modelo, ruta_salida="files/models/model.pkl.gz"):
+        os.makedirs(os.path.dirname(ruta_salida), exist_ok=True)
+        with gzip.open(ruta_salida, "wb") as archivo:
+            pickle.dump(modelo, archivo)
+
+
+
+    def generar_metricas(modelo, x_train, y_train, x_test, y_test, ruta="files/output/metrics.json"):
+
+        os.makedirs(os.path.dirname(ruta), exist_ok=True)
+        registros = []
+
+        for nombre, X, y in [("train", x_train, y_train), ("test", x_test, y_test)]:
+            pred = modelo.predict(X)
+            registro = {
+                "type": "metrics",
+                "dataset": nombre,
+                "precision": precision_score(y, pred),
+                "balanced_accuracy": balanced_accuracy_score(y, pred),
+                "recall": recall_score(y, pred),
+                "f1_score": f1_score(y, pred)
+            }
+            registros.append(registro)
+
+        with open(ruta, "w", encoding="utf-8") as salida:
+            for r in registros:
+                salida.write(json.dumps(r) + "\n")
+
+    def agregar_matrices_conf(modelo, x_train, y_train, x_test, y_test, ruta="files/output/metrics.json"):
+
+        with open(ruta, "r", encoding="utf-8") as archivo:
+            contenido = [json.loads(linea) for linea in archivo]
+
+        for nombre, X, y in [("train", x_train, y_train), ("test", x_test, y_test)]:
+            pred = modelo.predict(X)
+            matriz = confusion_matrix(y, pred, labels=[0, 1])
+
+            dato_cm = {
+                "type": "cm_matrix",
+                "dataset": nombre,
+                "true_0": {
+                    "predicted_0": int(matriz[0][0]),
+                    "predicted_1": int(matriz[0][1]),
+                },
+                "true_1": {
+                    "predicted_0": int(matriz[1][0]),
+                    "predicted_1": int(matriz[1][1]),
+                }
+            }
+
+            contenido.append(dato_cm)
+
+        with open(ruta, "w", encoding="utf-8") as archivo:
+            for elemento in contenido:
+                archivo.write(json.dumps(elemento) + "\n")
+
+
+    ruta = "files/input/"
+
+    df_train = cargar_archivo(ruta + "train_data.csv.zip")
+    df_test = cargar_archivo(ruta + "test_data.csv.zip")
+
+    df_train = depurar(df_train)
+    df_test = depurar(df_test)
+
+    x_train = df_train.drop(columns=["default"])
+    y_train = df_train["default"]
+
+    x_test = df_test.drop(columns=["default"])
+    y_test = df_test["default"]
+
+    pipe = construir_pipeline()
+    mejor_modelo = ajustar_modelo(pipe, x_train, y_train)
+
+    guardar_modelo(mejor_modelo)
+    generar_metricas(mejor_modelo, x_train, y_train, x_test, y_test)
+    agregar_matrices_conf(mejor_modelo, x_train, y_train, x_test, y_test)
+
+
+if __name__ == "__main__":
+    solucion()
